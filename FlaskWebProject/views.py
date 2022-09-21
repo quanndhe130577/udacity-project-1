@@ -13,7 +13,9 @@ from FlaskWebProject.models import User, Post
 import msal
 import uuid
 
-imageSourceUrl = 'https://'+ app.config['BLOB_ACCOUNT']  + '.blob.core.windows.net/' + app.config['BLOB_CONTAINER']  + '/'
+imageSourceUrl = 'https://' + app.config['BLOB_ACCOUNT'] + \
+    '.blob.core.windows.net/' + app.config['BLOB_CONTAINER'] + '/'
+
 
 @app.route('/')
 @app.route('/home')
@@ -27,13 +29,15 @@ def home():
         posts=posts
     )
 
+
 @app.route('/new_post', methods=['GET', 'POST'])
 @login_required
 def new_post():
     form = PostForm(request.form)
     if form.validate_on_submit():
         post = Post()
-        post.save_changes(form, request.files['image_path'], current_user.id, new=True)
+        post.save_changes(
+            form, request.files['image_path'], current_user.id, new=True)
         return redirect(url_for('home'))
     return render_template(
         'post.html',
@@ -58,6 +62,7 @@ def post(id):
         form=form
     )
 
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -66,9 +71,11 @@ def login():
     if form.validate_on_submit():
         user = User.query.filter_by(username=form.username.data).first()
         if user is None or not user.check_password(form.password.data):
+            app.logger.warning('Invalid logging with username and password')
             flash('Invalid username or password')
             return redirect(url_for('login'))
         login_user(user, remember=form.remember_me.data)
+        app.logger.info('Valid logging with username and password')
         next_page = request.args.get('next')
         if not next_page or url_parse(next_page).netloc != '':
             next_page = url_for('home')
@@ -77,7 +84,9 @@ def login():
     auth_url = _build_auth_url(scopes=Config.SCOPE, state=session["state"])
     return render_template('login.html', title='Sign In', form=form, auth_url=auth_url)
 
-@app.route(Config.REDIRECT_PATH)  # Its absolute URL must match your app's redirect_uri set in AAD
+
+# Its absolute URL must match your app's redirect_uri set in AAD
+@app.route(Config.REDIRECT_PATH)
 def authorized():
     if request.args.get('state') != session.get("state"):
         return redirect(url_for("home"))  # No-OP. Goes back to Index page
@@ -86,10 +95,13 @@ def authorized():
     if request.args.get('code'):
         cache = _load_cache()
         # TODO: Acquire a token from a built msal app, along with the appropriate redirect URI
-        result = None
+        result = _build_msal_app(cache).acquire_token_by_authorization_code(
+            scopes=Config.SCOPE, code=request.args.get('code'), redirect_uri=Config.REDIRECT_URL)
         if "error" in result:
+            app.logger.warning('Invalid logging with Azure AD')
             return render_template("auth_error.html", result=result)
         session["user"] = result.get("id_token_claims")
+        app.logger.info('Valid logging with Azure AD')
         # Note: In a real app, we'd use the 'name' property from session["user"] below
         # Here, we'll use the admin username for anyone who is authenticated by MS
         user = User.query.filter_by(username="admin").first()
@@ -97,10 +109,11 @@ def authorized():
         _save_cache(cache)
     return redirect(url_for('home'))
 
+
 @app.route('/logout')
 def logout():
     logout_user()
-    if session.get("user"): # Used MS Login
+    if session.get("user"):  # Used MS Login
         # Wipe out user and its token cache from session
         session.clear()
         # Also logout from your tenant's web session
@@ -110,19 +123,29 @@ def logout():
 
     return redirect(url_for('login'))
 
+
 def _load_cache():
     # TODO: Load the cache from `msal`, if it exists
-    cache = None
+    cache = msal.SerializableTokenCache()
+    if session.get('token_cache'):
+        cache.deserialize(session['token_cache'])
     return cache
 
+
 def _save_cache(cache):
-    # TODO: Save the cache, if it has changed
-    pass
+    if cache.has_state_changed:
+        session['token_cache'] = cache.serialize()
+
 
 def _build_msal_app(cache=None, authority=None):
     # TODO: Return a ConfidentialClientApplication
-    return None
+    confidentialClientApp = msal.ConfidentialClientApplication(
+        Config.CLIENT_ID, Config.CLIENT_SECRET, token_cache=cache)
+    return confidentialClientApp
+
 
 def _build_auth_url(authority=None, scopes=None, state=None):
     # TODO: Return the full Auth Request URL with appropriate Redirect URI
-    return None
+    auth_url = _build_msal_app().get_authorization_request_url(
+        scopes=scopes, state=state, redirect_uri=Config.REDIRECT_URL)
+    return auth_url
